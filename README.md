@@ -95,36 +95,21 @@ docker run --rm -v /your/path/emqx_pg_ingest:/p -w /p -e BUILD_WITHOUT_QUIC=1 er
 并发布预装插件的多架构镜像 `ghcr.io/redgreat/emqx_pg_ingest:<版本>` 与 `latest`。
 公开仓库创建的 GHCR Package 关联本仓库并继承公开可见性。
 
-发布前先提交全部修改，然后任选一个脚本推送标签：
+发布前先提交并推送全部修改，然后任选一个脚本推送标签。无参数默认自动递增 patch：
 
 ```bash
-./scripts/release.sh -t v0.1.0
-# 或自动递增 patch：./scripts/release.sh -t auto
+./scripts/release.sh
+# 指定版本：./scripts/release.sh v0.2.0
 ```
 
 ```powershell
-.\scripts\release.ps1 -Tag v0.1.0
-# 或自动递增 patch：.\scripts\release.ps1 -Tag auto
+.\scripts\release.ps1
+# 指定版本：.\scripts\release.ps1 -Tag v0.2.0
 ```
 
 `.github/workflows/ci.yaml` 会依次执行 EUnit、按标签写入插件版本、构建 `.tar.gz` 和 SHA256、
 构建 `linux/amd64 + linux/arm64` 镜像、推送 GHCR，最后创建 GitHub Release。任一步失败都不会发布不完整 Release。
-
-Release 构建完成后，部署机直接运行：
-
-```bash
-./scripts/release.sh
-```
-
-或在 Windows 上运行：
-
-```powershell
-.\scripts\release.ps1
-```
-
-脚本会同步正式 `docker-compose.yml`，保留既有 `etc/emqx_pg_ingest.json`，拉取
-`ghcr.io/redgreat/emqx_pg_ingest:latest`，启动后同时检查 EMQX 状态、插件列表和
-`[emqx_pg_ingest] plugin started` 日志。使用 `--sync-config` / `-SyncConfig` 才会覆盖部署配置。
+发布脚本只负责校验 Git 状态和推送标签，不安装 Docker、不在本机构建，也不执行本地部署。
 
 **不装 EMQX 的裸机自测**（解码/匹配/配置三块是纯 Erlang，任何 OTP 都能跑）：
 
@@ -171,36 +156,15 @@ curl -u $KEY:$SECRET -X POST http://$EMQX_HOST:18083/api/v5/plugins/install \
      -H "Content-Type: multipart/form-data" -F "plugin=@emqx_pg_ingest-0.1.0.tar.gz"
 ```
 
-**方式 D：预装进 Docker 镜像（推荐，免 allow、免手工安装）**
+**方式 D：使用 CI 发布的预装镜像（推荐，免 allow、免手工安装）**
 
-见 `Dockerfile`：解压插件包 + 在 `base.hocon` 注册 `plugins.states` → 容器启动即加载启用；
-升级只改 `--build-arg PLUGIN_VSN=<新版本>` 重新构建。
-
-```bash
-cd emqx_pg_ingest
-# 先把 make rel/Release 生成的同版本 tar.gz 放在当前目录
-docker compose -f docker-compose.plugin.yml build --no-cache
-docker compose -f docker-compose.plugin.yml up -d
-docker exec emqx emqx ctl plugins list
-docker logs emqx 2>&1 | grep -E 'emqx_pg_ingest|PG 已连接|配置已加载'
-```
-
-`docker-compose.plugin.yml` 固定使用 `emqx/emqx:5.9.1`，与本插件的
-`emqx-plugin-helper v5.9.1 + OTP 27` 构建目标一致。不要使用 `emqx:latest`，否则升级到不同
-EMQX/OTP 大版本后，现有 BEAM 包可能无法加载。
+`Dockerfile` 仅由 GitHub Actions 使用：CI 将插件解压进固定的 EMQX 5.9.1 镜像，并在
+`base.hocon` 注册 `plugins.states`。部署端使用 `docker-compose.yml` 拉取
+`ghcr.io/redgreat/emqx_pg_ingest:latest`，仓库不再提供本地插件镜像构建流程。
 
 > **不能挂载整个 `/opt/emqx/etc` 或 `/opt/emqx/plugins`。** Docker bind mount 会遮住镜像里
 > 已追加到 `base.hocon` 的 `plugins.states` 和已解压插件目录，这正是“包已挂载但插件没有加载”的常见原因。
-> 只挂载 `/opt/emqx/etc/emqx_pg_ingest.json` 这一个业务配置文件即可。模板使用 named volume
-> 保存 EMQX data/log，从而避免宿主机 UID 1000 权限问题；若要沿用已有 `./data`，先备份，再把
-> `emqx_data:/opt/emqx/data` 改回 `./data:/opt/emqx/data`，但仍不要恢复 etc/plugins 整目录挂载。
-
-若版本不是 `0.1.0`，包名、`PLUGIN_VSN` 和镜像标签必须完全一致，例如：
-
-```bash
-PLUGIN_VSN=0.1.8 docker compose -f docker-compose.plugin.yml build --no-cache
-PLUGIN_VSN=0.1.8 docker compose -f docker-compose.plugin.yml up -d
-```
+> 只挂载 `/opt/emqx/etc/emqx_pg_ingest.json` 这一个业务配置文件即可，仍不要恢复 etc/plugins 整目录挂载。
 
 ### 升级版本时还要不要重新 `allow`？
 
