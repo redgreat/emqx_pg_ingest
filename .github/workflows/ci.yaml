@@ -123,6 +123,39 @@ jobs:
             org.opencontainers.image.description=EMQX RaceBox binary ingest plugin pre-installed on EMQX 5.9.1
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
+      - name: Build and smoke test EMQX plugin image
+        shell: bash
+        env:
+          IMAGE: emqx-pg-ingest:smoke
+        run: |
+          set -euo pipefail
+          container=emqx-pg-ingest-smoke
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker build \
+            --build-arg "EMQX_IMAGE=${{ env.EMQX_IMAGE }}" \
+            --build-arg "PLUGIN_VSN=${{ needs.build-plugin.outputs.version }}" \
+            --tag "$IMAGE" .
+          docker run -d --name "$container" "$IMAGE"
+
+          ready=0
+          for _ in $(seq 1 40); do
+            if docker exec "$container" emqx ctl status >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 3
+          done
+          if [[ "$ready" -ne 1 ]]; then
+            docker logs "$container"
+            echo "EMQX did not become ready" >&2
+            exit 1
+          fi
+
+          plugin_status="$(docker exec "$container" emqx ctl plugins list)"
+          printf '%s\n' "$plugin_status"
+          grep -F "emqx_pg_ingest-${{ needs.build-plugin.outputs.version }}" <<<"$plugin_status"
+          grep -Eq '"running_status"[[:space:]]*:[[:space:]]*"running"' <<<"$plugin_status"
+
       - name: Build and push multi-platform image
         uses: docker/build-push-action@v6
         with:

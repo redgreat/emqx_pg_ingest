@@ -18,9 +18,11 @@ RUN cd /opt/emqx/plugins \
     && mkdir -p ${PLUGIN_NAME}-${PLUGIN_VSN} \
     && tar zxf ${PLUGIN_NAME}-${PLUGIN_VSN}.tar.gz -C ${PLUGIN_NAME}-${PLUGIN_VSN}
 
-# 2) 注册到 EMQX 配置（plugins.states），enable = true → 启动时自动加载并启用
-RUN printf '\nplugins {\n  states = [\n    { name_vsn = "%s-%s", enable = true }\n  ]\n}\n' \
-      "${PLUGIN_NAME}" "${PLUGIN_VSN}" >> /opt/emqx/etc/base.hocon
+# 2) 用环境变量注册并启用插件。
+# EMQX 配置优先级为 base.hocon < cluster.hocon < emqx.conf < ENV。若只写
+# base.hocon，宿主机持久化的 data/configs/cluster.hocon 可能用旧的空 states
+# 覆盖它，导致镜像里虽有插件文件，Dashboard 和 plugins list 却为空。
+ENV EMQX_PLUGINS__STATES="[{name_vsn = \"${PLUGIN_NAME}-${PLUGIN_VSN}\", enable = true}]"
 
 # 插件业务配置包含数据库连接信息，不烘焙进镜像；运行时仅挂载单个 JSON 文件。
 # 不要再挂载整个 /opt/emqx/etc 或 /opt/emqx/plugins，否则会遮住上面的预装内容。
