@@ -34,6 +34,11 @@ magic_test() ->
     ?assertEqual(simlive_bm, emqx_pg_ingest_codec:magic(<<"BM", 1, 1, 0>>)),
     ?assertEqual(unknown, emqx_pg_ingest_codec:magic(<<"XX", 0>>)).
 
+hook_registration_shape_test() ->
+    {'message.publish', {emqx_pg_ingest, on_message_publish, []}, Priority} =
+        emqx_pg_ingest:hook_spec(),
+    ?assert(is_integer(Priority)).
+
 decode_unknown_codec_test() ->
     ?assertMatch({error, {unsupported_codec, foo}}, emqx_pg_ingest_codec:decode(foo, <<1, 2>>)),
     ?assertMatch({error, unknown_magic}, emqx_pg_ingest_codec:decode(auto, <<"nope">>)).

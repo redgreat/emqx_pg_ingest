@@ -9,7 +9,7 @@
 %%%-------------------------------------------------------------------
 -module(emqx_pg_ingest).
 
--export([load/0, unload/0, reload/0, on_message_publish/1, stats/0]).
+-export([load/0, unload/0, reload/0, on_message_publish/1, stats/0, hook_spec/0]).
 
 -define(CFG_KEY, {?MODULE, cfg}).
 -define(STATS, emqx_pg_ingest_stats).
@@ -29,7 +29,13 @@ load() ->
                 [maps:get(<<"topic">>, T, <<>>) || T <- Topics, is_map(T)]
             ])
     end,
-    emqx_hooks:add('message.publish', {?MODULE, on_message_publish, []}, 'emqx_pg_ingest').
+    {HookPoint, Callback, Priority} = hook_spec(),
+    emqx_hooks:add(HookPoint, Callback, Priority).
+
+%% EMQX 5.9 的 emqx_hooks:add/3 第三个参数必须是整数优先级，不能传插件名原子。
+-spec hook_spec() -> {atom(), {module(), atom(), list()}, integer()}.
+hook_spec() ->
+    {'message.publish', {?MODULE, on_message_publish, []}, 0}.
 
 %% @doc 插件停止：移除钩子。
 -spec unload() -> ok.

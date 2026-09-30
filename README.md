@@ -117,7 +117,7 @@ docker run --rm -v /your/path/emqx_pg_ingest:/p -w /p -e BUILD_WITHOUT_QUIC=1 er
 mkdir -p ebin
 erlc -o ebin src/*.erl test/*.erl
 erl -noshell -pa ebin -eval 'eunit:test(emqx_pg_ingest_codec_tests, [verbose]), init:stop().'
-# → All 13 tests passed
+# → All 14 tests passed
 ```
 
 ## 安装（自建 EMQX 5.x）
