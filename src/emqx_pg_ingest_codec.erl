@@ -263,7 +263,7 @@ decode_rbx1_record(
         hour => Hour,
         minute => Minute,
         second => Second,
-        time_accuracy => TimeAccuracy,
+        time_accuracy => uint32_measurement(TimeAccuracy),
         nanoseconds => Nanoseconds,
         fix_status => FixStatus,
         numberof_svs => Svs,
@@ -276,7 +276,7 @@ decode_rbx1_record(
         %% RBX1 的 speed 是 m/s（文档 §2）→ 统一换算 km/h
         speed => Speed / 1000.0 * ?MPS_TO_KMH,
         heading => Heading / 1.0e5,
-        speed_accuracy => SpeedAcc,
+        speed_accuracy => uint32_measurement(SpeedAcc),
         heading_accuracy => HeadingAcc,
         pdop => Pdop,
         gforce_x => Gx / 1000.0,
@@ -286,6 +286,12 @@ decode_rbx1_record(
         rotation_rate_y => Ry / 100.0,
         rotation_rate_z => Rz / 100.0
     }.
+
+%% UBX/RaceBox 用 uint32 最大值表示未知或无效测量。PostgreSQL 对应列是
+%% int4；把协议哨兵保留为 4294967295 会令 epgsql 在编码阶段溢出并断开连接。
+%% SQL NULL 与设备语义一致，同时保留其余有效的原始测量值。
+uint32_measurement(16#FFFFFFFF) -> null;
+uint32_measurement(Value) -> Value.
 
 %%%===================================================================
 %%% simlive（RB / BM）
@@ -340,7 +346,7 @@ decode_simlive_rb_record(
         hour => Hour,
         minute => Minute,
         second => Second,
-        time_accuracy => TimeAccuracy,
+        time_accuracy => uint32_measurement(TimeAccuracy),
         nanoseconds => Nanoseconds,
         fix_status => FixStatus,
         numberof_svs => Svs,
@@ -353,7 +359,7 @@ decode_simlive_rb_record(
         %% simlive 的 speed 已是 km/h
         speed => Speed / 100.0 * 60.0,
         heading => Heading / 1.0e5,
-        speed_accuracy => SpeedAcc,
+        speed_accuracy => uint32_measurement(SpeedAcc),
         heading_accuracy => HeadingAcc / 1.0e5,
         pdop => Pdop,
         battery => Battery,

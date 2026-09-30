@@ -109,18 +109,34 @@ ingest_item(Item, #st{conn = Conn, cfg = Cfg, index = Index} = St) ->
         _ ->
             case completed(Profile, Decoded, Conn) orelse duplicated(Profile, Decoded, Conn) of
                 true ->
-                    count(duplicate);
+                    count(duplicate),
+                    logger:info(
+                        "[emqx_pg_ingest] 幂等跳过 kind=~p file_name=~ts session_key=~p "
+                        "batch_key=~p offset=~p records=~p",
+                        log_values(Decoded)
+                    );
                 false ->
                     ImpStamp = emqx_pg_ingest_codec:uuid_v4(),
                     N = run_tx(Conn, fun(C) -> write_all(C, Profile, Decoded, ImpStamp, File) end),
                     count(written),
                     logger:info(
-                        "[emqx_pg_ingest] 入库完成 worker=~p file_name=~ts records=~p",
-                        [Index, File, N]
+                        "[emqx_pg_ingest] 入库完成 worker=~p kind=~p file_name=~ts "
+                        "session_key=~p batch_key=~p offset=~p records=~p",
+                        [Index | log_values(Decoded#{record_count => N})]
                     )
             end,
             St
     end.
+
+log_values(Decoded) ->
+    [
+        maps:get(kind, Decoded, unknown),
+        maps:get(file_name, Decoded, <<"?">>),
+        maps:get(session_key, Decoded, undefined),
+        maps:get(batch_key, Decoded, undefined),
+        maps:get(session_offset, Decoded, maps:get(offset, Decoded, undefined)),
+        maps:get(record_count, Decoded, 0)
+    ].
 
 %% RBX1/simlive_rb 没有 RBX2 才提供的 session_key/batch_key/record_index。
 %% 它们与 RBX2 共用 auto 解码主题时，必须自动回退到按 file_name

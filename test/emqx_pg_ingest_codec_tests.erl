@@ -183,6 +183,17 @@ rbx2_decode_and_stable_session_test() ->
     ?assertEqual(<<"20260924221855_open_1000_0">>, maps:get(file_name, Open)),
     ?assertEqual(false, maps:get(session_complete, Open)).
 
+rbx2_uint32_unknown_measurements_become_null_test() ->
+    SyncId = <<16#30, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>>,
+    Record = rbx1_record_accuracy(1520, 0, 0, 0, 16#FFFFFFFF, 16#FFFFFFFF),
+    Payload = rbx2_payload([Record], SyncId, pad48(<<"RaceBox Mini S 2254300997">>),
+                           0, 1, 0, 0, 1, 20200802000001, 20200802000001,
+                           1520, 520000000, 3),
+    {ok, Decoded} = emqx_pg_ingest_codec:decode(rbx2, Payload),
+    [DecodedRecord] = maps:get(records, Decoded),
+    ?assertEqual(null, maps:get(time_accuracy, DecodedRecord)),
+    ?assertEqual(null, maps:get(speed_accuracy, DecodedRecord)).
+
 rbx1_length_error_test() ->
     Payload = rbx1_payload([rbx1_record(1, 1, 1, 1)], <<0:128>>, pad48(<<"dev">>), 0, 1),
     Broken = binary:part(Payload, 0, byte_size(Payload) - 1),
@@ -258,10 +269,14 @@ simlive_bm_decode_test() ->
 %%%===================================================================
 
 rbx1_record(Itow, LonMicro, LatMicro, SpeedMmS) ->
-    <<Itow:32/little, 2026:16/little, 9:8, 26:8, 12:8, 0:8, 0:8, 0:8, 0:32/little,
+    rbx1_record_accuracy(Itow, LonMicro, LatMicro, SpeedMmS, 0, 0).
+
+rbx1_record_accuracy(Itow, LonMicro, LatMicro, SpeedMmS, TimeAccuracy, SpeedAccuracy) ->
+    <<Itow:32/little, 2026:16/little, 9:8, 26:8, 12:8, 0:8, 0:8, 0:8,
+        TimeAccuracy:32/little,
         0:32/little-signed, 3:8, 0:16, 12:8, LonMicro:32/little-signed, LatMicro:32/little-signed,
         0:32/little-signed, 0:32/little-signed, 0:32/little, 0:32/little, SpeedMmS:32/little-signed,
-        9000000:32/little-signed, 0:32/little, 0:32/little, 100:16/little, 0:16,
+        9000000:32/little-signed, SpeedAccuracy:32/little, 0:32/little, 100:16/little, 0:16,
         10:16/little-signed, 20:16/little-signed, 30:16/little-signed, 100:16/little-signed,
         200:16/little-signed, 300:16/little-signed>>.
 
