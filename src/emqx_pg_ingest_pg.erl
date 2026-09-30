@@ -14,7 +14,14 @@
 
 -behaviour(gen_server).
 
--export([start_link/2, ingest/2, worker_name/1, select_profile/2, normalize_sql/2]).
+-export([
+    start_link/2,
+    ingest/2,
+    worker_name/1,
+    select_profile/2,
+    normalize_sql/2,
+    transaction_result/1
+]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(STATS, emqx_pg_ingest_stats).
@@ -130,10 +137,7 @@ run_tx(Conn, Fun) ->
     _ = code:ensure_loaded(epgsql),
     case erlang:function_exported(epgsql, with_transaction, 2) of
         true ->
-            case epgsql:with_transaction(Conn, Fun) of
-                {ok, Result} -> Result;
-                {rollback, Reason} -> erlang:error({transaction_rollback, Reason})
-            end;
+            transaction_result(epgsql:with_transaction(Conn, Fun));
         false ->
             {ok, [], []} = epgsql:equery(Conn, "BEGIN", []),
             try
@@ -146,6 +150,14 @@ run_tx(Conn, Fun) ->
                     erlang:raise(Class, Reason, [])
             end
     end.
+
+%% epgsql:with_transaction/2 成功时原样返回回调函数的结果，
+%% 并不包装为 {ok, Result}。本插件的回调返回写入条数整数。
+-spec transaction_result(term()) -> term().
+transaction_result({rollback, Reason}) ->
+    erlang:error({transaction_rollback, Reason});
+transaction_result(Result) ->
+    Result.
 
 write_all(C, Profile, Decoded, ImpStamp, File) ->
     Records = maps:get(records, Decoded),

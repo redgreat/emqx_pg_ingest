@@ -66,6 +66,14 @@ legacy_conflict_sql_normalization_test() ->
     ),
     ?assertEqual(Old, emqx_pg_ingest_pg:normalize_sql(<<"record">>, Old)).
 
+transaction_result_contract_test() ->
+    ?assertEqual(720, emqx_pg_ingest_pg:transaction_result(720)),
+    ?assertEqual({ok, custom_reply}, emqx_pg_ingest_pg:transaction_result({ok, custom_reply})),
+    ?assertError(
+        {transaction_rollback, database_error},
+        emqx_pg_ingest_pg:transaction_result({rollback, database_error})
+    ).
+
 decode_unknown_codec_test() ->
     ?assertMatch({error, {unsupported_codec, foo}}, emqx_pg_ingest_codec:decode(foo, <<1, 2>>)),
     ?assertMatch({error, unknown_magic}, emqx_pg_ingest_codec:decode(auto, <<"nope">>)).
