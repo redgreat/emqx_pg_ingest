@@ -62,7 +62,7 @@ emqx_pg_ingest/
 │   ├── emqx_pg_ingest_sup.erl       监督树（worker 池）
 │   ├── emqx_pg_ingest_app.erl       application
 │   └── emqx_pg_ingest.app.src
-├── test/emqx_pg_ingest_codec_tests.erl   13 条 eunit
+├── test/emqx_pg_ingest_codec_tests.erl   15 条 eunit
 ├── priv/emqx_pg_ingest.json               配置样例（含可直接用的 SQL）
 └── README.md
 ```
@@ -117,7 +117,7 @@ docker run --rm -v /your/path/emqx_pg_ingest:/p -w /p -e BUILD_WITHOUT_QUIC=1 er
 mkdir -p ebin
 erlc -o ebin src/*.erl test/*.erl
 erl -noshell -pa ebin -eval 'eunit:test(emqx_pg_ingest_codec_tests, [verbose]), init:stop().'
-# → All 14 tests passed
+# → All 15 tests passed
 ```
 
 ## 安装（自建 EMQX 5.x）

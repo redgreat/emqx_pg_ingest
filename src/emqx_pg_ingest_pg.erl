@@ -14,7 +14,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/2, ingest/2, worker_name/1]).
+-export([start_link/2, ingest/2, worker_name/1, select_profile/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(STATS, emqx_pg_ingest_stats).
@@ -89,9 +89,10 @@ safe_ingest(Item, St) ->
     end.
 
 ingest_item(Item, #st{conn = Conn, cfg = Cfg, index = Index} = St) ->
-    ProfileName = maps:get(profile, Item, <<"racebox">>),
-    Profile = emqx_pg_ingest_config:profile(Cfg, ProfileName),
     Decoded = maps:get(decoded, Item),
+    RequestedProfile = maps:get(profile, Item, <<"racebox">>),
+    ProfileName = select_profile(RequestedProfile, Decoded),
+    Profile = emqx_pg_ingest_config:profile(Cfg, ProfileName),
     File = maps:get(file_name, Decoded),
     case map_size(Profile) of
         0 ->
@@ -113,6 +114,17 @@ ingest_item(Item, #st{conn = Conn, cfg = Cfg, index = Index} = St) ->
             end,
             St
     end.
+
+%% RBX1/simlive_rb 没有 RBX2 才提供的 session_key/batch_key/record_index。
+%% 它们与 RBX2 共用 auto 解码主题时，必须自动回退到按 file_name
+%% 去重的旧 profile，否则会在组装 complete_dedup 参数时缺 session_key。
+-spec select_profile(binary(), map()) -> binary().
+select_profile(<<"racebox">>, #{kind := rbx1}) ->
+    <<"racebox_legacy">>;
+select_profile(<<"racebox">>, #{kind := simlive_rb}) ->
+    <<"racebox_legacy">>;
+select_profile(Profile, _Decoded) ->
+    Profile.
 
 run_tx(Conn, Fun) ->
     _ = code:ensure_loaded(epgsql),

@@ -39,6 +39,24 @@ hook_registration_shape_test() ->
         emqx_pg_ingest:hook_spec(),
     ?assert(is_integer(Priority)).
 
+protocol_profile_selection_test() ->
+    ?assertEqual(
+        <<"racebox_legacy">>,
+        emqx_pg_ingest_pg:select_profile(<<"racebox">>, #{kind => rbx1})
+    ),
+    ?assertEqual(
+        <<"racebox_legacy">>,
+        emqx_pg_ingest_pg:select_profile(<<"racebox">>, #{kind => simlive_rb})
+    ),
+    ?assertEqual(
+        <<"racebox">>,
+        emqx_pg_ingest_pg:select_profile(<<"racebox">>, #{kind => rbx2})
+    ),
+    ?assertEqual(
+        <<"custom">>,
+        emqx_pg_ingest_pg:select_profile(<<"custom">>, #{kind => rbx1})
+    ).
+
 decode_unknown_codec_test() ->
     ?assertMatch({error, {unsupported_codec, foo}}, emqx_pg_ingest_codec:decode(foo, <<1, 2>>)),
     ?assertMatch({error, unknown_magic}, emqx_pg_ingest_codec:decode(auto, <<"nope">>)).
