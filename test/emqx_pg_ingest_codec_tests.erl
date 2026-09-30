@@ -57,6 +57,15 @@ protocol_profile_selection_test() ->
         emqx_pg_ingest_pg:select_profile(<<"custom">>, #{kind => rbx1})
     ).
 
+legacy_conflict_sql_normalization_test() ->
+    Old = <<"INSERT INTO imp_racebox(file_name) VALUES ($1) ON CONFLICT (file_name) DO NOTHING">>,
+    New = emqx_pg_ingest_pg:normalize_sql(<<"imp">>, Old),
+    ?assertEqual(
+        <<"INSERT INTO imp_racebox(file_name) VALUES ($1) ON CONFLICT DO NOTHING">>,
+        New
+    ),
+    ?assertEqual(Old, emqx_pg_ingest_pg:normalize_sql(<<"record">>, Old)).
+
 decode_unknown_codec_test() ->
     ?assertMatch({error, {unsupported_codec, foo}}, emqx_pg_ingest_codec:decode(foo, <<1, 2>>)),
     ?assertMatch({error, unknown_magic}, emqx_pg_ingest_codec:decode(auto, <<"nope">>)).

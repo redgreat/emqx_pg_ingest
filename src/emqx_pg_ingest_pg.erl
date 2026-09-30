@@ -14,7 +14,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/2, ingest/2, worker_name/1, select_profile/2]).
+-export([start_link/2, ingest/2, worker_name/1, select_profile/2, normalize_sql/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(STATS, emqx_pg_ingest_stats).
@@ -197,7 +197,7 @@ maybe_exec(C, SqlKey, Profile, Values) ->
     end.
 
 exec_fields(C, SqlKey, Profile, Values) ->
-    SQL = sql_of(Profile, SqlKey),
+    SQL = normalize_sql(SqlKey, sql_of(Profile, SqlKey)),
     Params = params(fields_of(Profile, SqlKey), Values),
     case exec(C, SqlKey, SQL, Params) of
         {ok, _Cols, _Rows} -> ok;
@@ -205,6 +205,20 @@ exec_fields(C, SqlKey, Profile, Values) ->
         {error, Reason} -> erlang:error({sql_failed, SqlKey, Reason});
         Other -> erlang:error({sql_unexpected, SqlKey, Other})
     end.
+
+%% 兼容已部署的旧 JSON：早期 racebox_legacy SQL 指定了
+%% ON CONFLICT (file_name)，但历史库不适合对整列建唯一约束。
+%% 去掉仲裁目标后，PostgreSQL 仍会使用 RBX1 部分唯一索引阻止重投。
+-spec normalize_sql(binary(), binary()) -> binary().
+normalize_sql(<<"imp">>, SQL) when is_binary(SQL) ->
+    re:replace(
+        SQL,
+        <<"ON\\s+CONFLICT\\s*\\(\\s*file_name\\s*\\)">>,
+        <<"ON CONFLICT">>,
+        [global, caseless, {return, binary}]
+    );
+normalize_sql(_SqlKey, SQL) ->
+    SQL.
 
 sql_of(Profile, <<"imp">>) -> maps:get(<<"imp">>, Profile, undefined);
 sql_of(Profile, <<"record">>) -> maps:get(<<"record">>, Profile, undefined);
