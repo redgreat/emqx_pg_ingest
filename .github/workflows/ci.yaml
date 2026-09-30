@@ -1,0 +1,157 @@
+name: Release plugin and container image
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  EMQX_IMAGE: emqx/emqx:5.9.1
+
+jobs:
+  build-plugin:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      package: ${{ steps.package.outputs.package }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Tag must be vMAJOR.MINOR.PATCH, got: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Erlang OTP 27
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+
+      - name: Stamp application version
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i "s/{release, {emqx_pg_ingest, \"[^\"]*\"}/{release, {emqx_pg_ingest, \"${VERSION}\"}/" rebar.config
+          sed -i "s/{vsn, \"[^\"]*\"}/{vsn, \"${VERSION}\"}/" src/emqx_pg_ingest.app.src
+
+      - name: Test and package plugin
+        env:
+          BUILD_WITHOUT_QUIC: "1"
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          make eunit
+          make rel
+
+      - name: Locate package
+        id: package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          package="$(find _build/default/emqx_plugrel -maxdepth 1 -type f -name "emqx_pg_ingest-${VERSION}.tar.gz" -print -quit)"
+          [[ -n "$package" ]] || { echo "Plugin package not found" >&2; exit 1; }
+          cp "$package" "emqx_pg_ingest-${VERSION}.tar.gz"
+          echo "package=emqx_pg_ingest-${VERSION}.tar.gz" >> "$GITHUB_OUTPUT"
+          sha256sum "emqx_pg_ingest-${VERSION}.tar.gz" > "emqx_pg_ingest-${VERSION}.tar.gz.sha256"
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emqx-pg-ingest-${{ steps.version.outputs.version }}
+          path: |
+            emqx_pg_ingest-${{ steps.version.outputs.version }}.tar.gz
+            emqx_pg_ingest-${{ steps.version.outputs.version }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-image:
+    needs: build-plugin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: emqx-pg-ingest-${{ needs.build-plugin.outputs.version }}
+          path: .
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=emqx_pg_ingest
+            org.opencontainers.image.description=EMQX RaceBox binary ingest plugin pre-installed on EMQX 5.9.1
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Build and push multi-platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            EMQX_IMAGE=${{ env.EMQX_IMAGE }}
+            PLUGIN_VSN=${{ needs.build-plugin.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  github-release:
+    needs: [build-plugin, publish-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: emqx-pg-ingest-${{ needs.build-plugin.outputs.version }}
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/emqx_pg_ingest-${{ needs.build-plugin.outputs.version }}.tar.gz
+            dist/emqx_pg_ingest-${{ needs.build-plugin.outputs.version }}.tar.gz.sha256
+

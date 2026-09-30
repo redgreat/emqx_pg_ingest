@@ -1,0 +1,40 @@
+services:
+  emqx:
+    image: ${EMQX_IMAGE:-ghcr.io/redgreat/emqx_pg_ingest:latest}
+    container_name: emqx
+    hostname: node1.emqx.local
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "8084:8084"
+      - "18083:18083"
+    volumes:
+      - ./data:/opt/emqx/data
+      - ./log:/opt/emqx/log
+      - ./etc/emqx_pg_ingest.json:/opt/emqx/etc/emqx_pg_ingest.json:ro
+    environment:
+      DISABLE_IPV6: "true"
+      TZ: Asia/Shanghai
+      EMQX_NODE_NAME: emqx@node1.emqx.local
+      EMQX_PG_INGEST_CONF: /opt/emqx/etc/emqx_pg_ingest.json
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+    mem_swappiness: 0
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,12 @@
+{application, emqx_pg_ingest,
+ [{description, "EMQX 插件：订阅二进制定位/BMS 报文并写入 PostgreSQL（SQL 可配置）"},
+  {vsn, "0.1.0"},
+  {registered, [emqx_pg_ingest_sup]},
+  {mod, {emqx_pg_ingest_app, []}},
+  {applications, [kernel, stdlib, crypto, sasl, epgsql]},
+  {env, []},
+  {modules, []},
+  {licenses, ["MIT"]},
+  {links, []}
+ ]}.
+

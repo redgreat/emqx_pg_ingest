@@ -1,0 +1,11 @@
+.git
+.github
+_build
+ebin
+data
+log
+etc
+rebar3
+rebar.lock
+*.beam
+erl_crash.dump

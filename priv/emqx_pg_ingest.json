@@ -1,0 +1,124 @@
+{
+  "_说明": "EMQX PG 消费插件配置样例。复制为 etc/emqx_pg_ingest.json（或设置 EMQX_PG_INGEST_CONF 指向它）后按需修改。SQL 全部可自定义：字段由 imp_fields/record_fields 与 SQL 里的 $n 一一对应。",
+
+  "pg": {
+    "host": "fn.wongcw.cn",
+    "port": 8432,
+    "username": "user_agent",
+    "password": "change-me",
+    "database": "eadm",
+    "pool_size": 2,
+    "timeout_ms": 5000
+  },
+
+  "topics": [
+    { "topic": "deskwong/racebox/data", "codec": "auto", "profile": "racebox" },
+    { "topic": "simlive/+/data", "codec": "simlive_rb", "profile": "racebox_legacy", "device_from_topic": 2 },
+    { "topic": "simlive/+/bms", "codec": "simlive_bm", "profile": "bms", "device_from_topic": 2 }
+  ],
+
+  "profiles": {
+    "racebox": {
+      "complete_dedup_fields": ["session_key", "file_name"],
+      "complete_dedup": "SELECT 1 WHERE EXISTS (SELECT 1 FROM imp_racebox WHERE session_key=$1 AND status='complete') OR (NOT EXISTS (SELECT 1 FROM imp_racebox WHERE session_key=$1) AND EXISTS (SELECT 1 FROM imp_racebox WHERE file_name=$2 AND status='complete'))",
+      "dedup_fields": ["batch_key"],
+      "dedup": "SELECT 1 FROM imp_racebox_batch WHERE batch_key = $1",
+      "imp_fields": ["file_name", "device_id", "imp_stamp", "duration", "session_total", "session_key", "sync_id"],
+      "imp": "INSERT INTO imp_racebox(file_name, device_id, imp_stamp, duration, record_count, expected_count, received_count, status, session_key, sync_id) VALUES ($1,$2,$3,$4,$5,$5,0,'receiving',$6,$7::uuid) ON CONFLICT (session_key) WHERE session_key IS NOT NULL DO UPDATE SET file_name=CASE WHEN EXISTS (SELECT 1 FROM imp_racebox old WHERE old.file_name=EXCLUDED.file_name AND old.session_key IS DISTINCT FROM EXCLUDED.session_key) THEN imp_racebox.file_name ELSE EXCLUDED.file_name END, record_count=GREATEST(imp_racebox.record_count,EXCLUDED.record_count), expected_count=GREATEST(imp_racebox.expected_count,EXCLUDED.expected_count), sync_id=EXCLUDED.sync_id",
+      "record_fields": [
+        "imp_stamp", "file_name", "device_id", "session_key", "record_index",
+        "itow", "year", "month", "day", "hour", "minute", "second",
+        "time_accuracy", "nanoseconds", "fix_status", "numberof_svs", "longitude", "latitude",
+        "wgs_altitude", "msl_altitude", "horizontal_accuracy", "vertical_accuracy", "speed", "heading",
+        "speed_accuracy", "heading_accuracy", "pdop", "gforce_x", "gforce_y", "gforce_z",
+        "rotation_rate_x", "rotation_rate_y", "rotation_rate_z"
+      ],
+      "record": "INSERT INTO lc_racebox(imp_stamp, file_name, device_id, session_key, record_index, itow, year, month, day, hour, minute, second, time_accuracy, nanoseconds, fix_status, numberof_svs, longitude, latitude, wgs_altitude, msl_altitude, horizontal_accuracy, vertical_accuracy, speed, heading, speed_accuracy, heading_accuracy, pdop, gforce_x, gforce_y, gforce_z, rotation_rate_x, rotation_rate_y, rotation_rate_z) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33) ON CONFLICT (session_key, record_index) WHERE session_key IS NOT NULL AND record_index IS NOT NULL DO UPDATE SET file_name=EXCLUDED.file_name",
+      "batch_fields": ["batch_key", "session_key", "sync_id", "session_offset", "record_count", "payload_crc32"],
+      "batch": "INSERT INTO imp_racebox_batch(batch_key, session_key, sync_id, batch_offset, record_count, payload_crc32) VALUES ($1,$2,$3::uuid,$4,$5,$6) ON CONFLICT (batch_key) DO NOTHING",
+      "finalize_fields": ["session_key", "file_name"],
+      "finalize": "WITH legacy AS (SELECT EXISTS(SELECT 1 FROM imp_racebox WHERE file_name=$2 AND session_key IS DISTINCT FROM $1) AS found), drop_records AS (DELETE FROM lc_racebox WHERE session_key=$1 AND (SELECT found FROM legacy)), drop_batches AS (DELETE FROM imp_racebox_batch WHERE session_key=$1 AND (SELECT found FROM legacy)), drop_session AS (DELETE FROM imp_racebox WHERE session_key=$1 AND (SELECT found FROM legacy)), tally AS (SELECT count(*)::integer AS n FROM lc_racebox WHERE session_key=$1), updated AS (UPDATE imp_racebox i SET file_name=$2, received_count=tally.n, status=CASE WHEN i.expected_count > 0 AND tally.n >= i.expected_count THEN 'complete' ELSE 'receiving' END, completed_at=CASE WHEN i.expected_count > 0 AND tally.n >= i.expected_count THEN COALESCE(i.completed_at,current_timestamp) ELSE NULL END FROM tally,legacy WHERE i.session_key=$1 AND NOT legacy.found RETURNING i.session_key,i.file_name) UPDATE lc_racebox l SET file_name=updated.file_name FROM updated WHERE l.session_key=updated.session_key AND l.file_name IS DISTINCT FROM updated.file_name"
+    },
+
+    "racebox_legacy": {
+      "dedup": "SELECT 1 FROM imp_racebox WHERE file_name = $1",
+      "imp_fields": [
+        "file_name",
+        "device_id",
+        "imp_stamp",
+        "duration",
+        "record_count"
+      ],
+      "imp": "INSERT INTO imp_racebox(file_name, device_id, imp_stamp, duration, record_count) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (file_name) DO NOTHING",
+      "record_fields": [
+        "imp_stamp",
+        "file_name",
+        "device_id",
+        "itow",
+        "year",
+        "month",
+        "day",
+        "hour",
+        "minute",
+        "second",
+        "time_accuracy",
+        "nanoseconds",
+        "fix_status",
+        "numberof_svs",
+        "longitude",
+        "latitude",
+        "wgs_altitude",
+        "msl_altitude",
+        "horizontal_accuracy",
+        "vertical_accuracy",
+        "speed",
+        "heading",
+        "speed_accuracy",
+        "heading_accuracy",
+        "pdop",
+        "gforce_x",
+        "gforce_y",
+        "gforce_z",
+        "rotation_rate_x",
+        "rotation_rate_y",
+        "rotation_rate_z"
+      ],
+      "record": "INSERT INTO lc_racebox(imp_stamp, file_name, device_id, itow, year, month, day, hour, minute, second, time_accuracy, nanoseconds, fix_status, numberof_svs, longitude, latitude, wgs_altitude, msl_altitude, horizontal_accuracy, vertical_accuracy, speed, heading, speed_accuracy, heading_accuracy, pdop, gforce_x, gforce_y, gforce_z, rotation_rate_x, rotation_rate_y, rotation_rate_z) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)"
+    },
+
+    "bms": {
+      "_说明": "仓库 scripts/racebox_tables.sql 目前没有 bms 表，需先按 README 的 DDL 建 imp_bms/lc_bms，或改写本 profile 指向你自己的表",
+      "dedup": "SELECT 1 FROM imp_bms WHERE file_name = $1",
+      "imp_fields": ["file_name", "device_id", "imp_stamp"],
+      "imp": "INSERT INTO imp_bms(file_name, device_id, imp_stamp) VALUES ($1,$2,$3) ON CONFLICT (file_name) DO NOTHING",
+      "record_fields": [
+        "imp_stamp",
+        "file_name",
+        "device_id",
+        "total_voltage",
+        "current",
+        "power",
+        "soc",
+        "soh",
+        "capacity_total",
+        "capacity_remain",
+        "cycle_ah",
+        "total_cycles",
+        "runtime_sec",
+        "cell_max_v",
+        "cell_min_v",
+        "cell_delta_v",
+        "cell_count",
+        "cell_voltages",
+        "temps_c",
+        "mos_temp_c",
+        "charging",
+        "chg_mos_on",
+        "dsg_mos_on",
+        "balancing",
+        "alarm_code"
+      ],
+      "record": "INSERT INTO lc_bms(imp_stamp, file_name, device_id, total_voltage, current, power, soc, soh, capacity_total, capacity_remain, cycle_ah, total_cycles, runtime_sec, cell_max_v, cell_min_v, cell_delta_v, cell_count, cell_voltages, temps_c, mos_temp_c, charging, chg_mos_on, dsg_mos_on, balancing, alarm_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)"
+    }
+  }
+}

@@ -1,0 +1,51 @@
+services:
+  emqx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        EMQX_IMAGE: ${EMQX_IMAGE:-emqx/emqx:5.9.1}
+        PLUGIN_VSN: ${PLUGIN_VSN:-0.1.0}
+    image: local/emqx-pg-ingest:${PLUGIN_VSN:-0.1.0}
+    container_name: emqx
+    hostname: node1.emqx.local
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "8084:8084"
+      - "18083:18083"
+    volumes:
+      # 只挂载业务配置文件；不得覆盖 /opt/emqx/etc 或 /opt/emqx/plugins。
+      - ./priv/emqx_pg_ingest.json:/opt/emqx/etc/emqx_pg_ingest.json:ro
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+    environment:
+      DISABLE_IPV6: "true"
+      TZ: Asia/Shanghai
+      EMQX_NODE_NAME: emqx@node1.emqx.local
+      EMQX_PG_INGEST_CONF: /opt/emqx/etc/emqx_pg_ingest.json
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+    mem_swappiness: 0
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  emqx_data:
+  emqx_log:
