@@ -277,7 +277,10 @@ decode_rbx1_record(
         speed => Speed / 1000.0 * ?MPS_TO_KMH,
         heading => Heading / 1.0e5,
         speed_accuracy => uint32_measurement(SpeedAcc),
-        heading_accuracy => HeadingAcc,
+        %% RBX1/deskwong 与 simlive 共用 lc_racebox.heading_accuracy，必须同量纲：
+        %% 设备值是 1e-5 度原始值（如 18000000），这里统一换算成「度」；
+        %% 直接写裸值既与 simlive 行不可比，也会撑爆 numeric(10,5)/int4。
+        heading_accuracy => heading_accuracy_deg(HeadingAcc),
         pdop => Pdop,
         gforce_x => Gx / 1000.0,
         gforce_y => Gy / 1000.0,
@@ -292,6 +295,16 @@ decode_rbx1_record(
 %% SQL NULL 与设备语义一致，同时保留其余有效的原始测量值。
 uint32_measurement(16#FFFFFFFF) -> null;
 uint32_measurement(Value) -> Value.
+
+%% heading_accuracy 是 uint32（协议单位 1e-5 度），与 simlive/RBX1 共用
+%% lc_racebox.heading_accuracy（numeric(10,5)，单位「度」），故统一换算成度：
+%% 原始值 /1e5 正好 5 位小数，numeric(10,5) 可无损容纳（哨兵 4294967295 除外）。
+%% 0xFFFFFFFF 哨兵按无效测量写 NULL：42949.67295 虽不溢出，但语义是"未知"。
+%% 注意：列必须是 numeric/decimal，若退回 integer 列需重新取整，
+%% 否则 epgsql 二进制协议对 int4 只接受整数，传浮点会 badarg 并杀掉连接进程。
+-spec heading_accuracy_deg(non_neg_integer()) -> float() | null.
+heading_accuracy_deg(16#FFFFFFFF) -> null;
+heading_accuracy_deg(Raw) -> Raw / 1.0e5.
 
 %%%===================================================================
 %%% simlive（RB / BM）
@@ -360,7 +373,7 @@ decode_simlive_rb_record(
         speed => Speed / 100.0 * 60.0,
         heading => Heading / 1.0e5,
         speed_accuracy => uint32_measurement(SpeedAcc),
-        heading_accuracy => HeadingAcc / 1.0e5,
+        heading_accuracy => heading_accuracy_deg(HeadingAcc),
         pdop => Pdop,
         battery => Battery,
         gforce_x => Gx / 1000.0,

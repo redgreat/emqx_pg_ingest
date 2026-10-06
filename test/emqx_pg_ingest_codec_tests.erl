@@ -228,6 +228,46 @@ simlive_rb_decode_test() ->
     ?assertEqual(1800.0, maps:get(speed, R)),
     ?assertEqual(77, maps:get(battery, R)).
 
+%% lc_racebox.heading_accuracy 是 numeric(10,5)、单位为「度」：
+%% 设备值 1e-5 度 → /1e5 后正好 5 位小数，可无损落库。
+simlive_rb_heading_accuracy_degrees_test() ->
+    Rec = simlive_rb_record(5000, 1134567890, 223456789, 3000, 18000000),
+    {ok, D} = emqx_pg_ingest_codec:decode(
+        simlive_rb, simlive_rb_payload(<<"unit_heading">>, [Rec], 0)
+    ),
+    [R] = maps:get(records, D),
+    ?assert(abs(maps:get(heading_accuracy, R) - 180.0) < 1.0e-9),
+    %% 小数精度不能被抹掉（12345 → 0.12345 度）
+    Small = simlive_rb_record(5000, 1134567890, 223456789, 3000, 12345),
+    {ok, D3} = emqx_pg_ingest_codec:decode(
+        simlive_rb, simlive_rb_payload(<<"unit_heading_small">>, [Small], 0)
+    ),
+    [R3] = maps:get(records, D3),
+    ?assert(abs(maps:get(heading_accuracy, R3) - 0.12345) < 1.0e-9),
+    %% uint32 哨兵（无效测量）→ NULL
+    Sentinel = simlive_rb_record(5000, 1134567890, 223456789, 3000, 16#FFFFFFFF),
+    {ok, D2} = emqx_pg_ingest_codec:decode(
+        simlive_rb, simlive_rb_payload(<<"unit_heading_null">>, [Sentinel], 0)
+    ),
+    [R2] = maps:get(records, D2),
+    ?assertEqual(null, maps:get(heading_accuracy, R2)).
+
+%% RBX1 设备值是 1e-5 度原始值：与 simlive 统一换算成「度」，
+%% 否则裸值（18000000、哨兵 4294967295）会撑爆 numeric(10,5)/int4。
+rbx1_heading_accuracy_degrees_test() ->
+    Rec = rbx1_record_accuracy(1520, 0, 0, 0, 0, 0, 18000000),
+    Payload = rbx1_payload([Rec], <<0:128>>, pad48(<<"dev">>), 0, 1),
+    {ok, D} = emqx_pg_ingest_codec:decode(rbx1, Payload),
+    [R] = maps:get(records, D),
+    ?assert(abs(maps:get(heading_accuracy, R) - 180.0) < 1.0e-9).
+
+rbx1_heading_accuracy_sentinel_becomes_null_test() ->
+    Rec = rbx1_record_accuracy(1520, 0, 0, 0, 0, 0, 16#FFFFFFFF),
+    Payload = rbx1_payload([Rec], <<0:128>>, pad48(<<"dev">>), 0, 1),
+    {ok, D} = emqx_pg_ingest_codec:decode(rbx1, Payload),
+    [R] = maps:get(records, D),
+    ?assertEqual(null, maps:get(heading_accuracy, R)).
+
 simlive_rb_bad_crc_test() ->
     Payload = simlive_rb_payload(<<"abc">>, [simlive_rb_record(1, 1, 1, 1)], 0),
     ?assertMatch(
@@ -272,11 +312,16 @@ rbx1_record(Itow, LonMicro, LatMicro, SpeedMmS) ->
     rbx1_record_accuracy(Itow, LonMicro, LatMicro, SpeedMmS, 0, 0).
 
 rbx1_record_accuracy(Itow, LonMicro, LatMicro, SpeedMmS, TimeAccuracy, SpeedAccuracy) ->
+    rbx1_record_accuracy(Itow, LonMicro, LatMicro, SpeedMmS, TimeAccuracy, SpeedAccuracy, 0).
+
+rbx1_record_accuracy(Itow, LonMicro, LatMicro, SpeedMmS, TimeAccuracy, SpeedAccuracy,
+        HeadingAcc) ->
     <<Itow:32/little, 2026:16/little, 9:8, 26:8, 12:8, 0:8, 0:8, 0:8,
         TimeAccuracy:32/little,
         0:32/little-signed, 3:8, 0:16, 12:8, LonMicro:32/little-signed, LatMicro:32/little-signed,
         0:32/little-signed, 0:32/little-signed, 0:32/little, 0:32/little, SpeedMmS:32/little-signed,
-        9000000:32/little-signed, SpeedAccuracy:32/little, 0:32/little, 100:16/little, 0:16,
+        9000000:32/little-signed, SpeedAccuracy:32/little, HeadingAcc:32/little, 100:16/little,
+        0:16,
         10:16/little-signed, 20:16/little-signed, 30:16/little-signed, 100:16/little-signed,
         200:16/little-signed, 300:16/little-signed>>.
 
@@ -303,10 +348,13 @@ rbx2_payload(Recs, SyncId, Device48, SyncOffset, SyncTotal, SessionIndex, Sessio
     <<Head132/binary, (erlang:crc32(Head132)):32/little, RecsBin/binary>>.
 
 simlive_rb_record(Itow, Lon, Lat, Speed) ->
+    simlive_rb_record(Itow, Lon, Lat, Speed, 0).
+
+simlive_rb_record(Itow, Lon, Lat, Speed, HeadingAcc) ->
     <<Itow:32/little, 2026:16/little, 9:8, 26:8, 12:8, 0:8, 0:8, 1:8, 0:32/little,
         0:32/little-signed, 3:8, 0:8, 0:8, 12:8, Lon:32/little-signed, Lat:32/little-signed,
         0:32/little-signed, 0:32/little-signed, 0:32/little, 0:32/little, Speed:32/little-signed,
-        9000000:32/little-signed, 0:32/little, 0:32/little, 100:16/little, 0:8, 77:8,
+        9000000:32/little-signed, 0:32/little, HeadingAcc:32/little, 100:16/little, 0:8, 77:8,
         10:16/little-signed, 20:16/little-signed, 30:16/little-signed, 100:16/little-signed,
         200:16/little-signed, 300:16/little-signed>>.
 
