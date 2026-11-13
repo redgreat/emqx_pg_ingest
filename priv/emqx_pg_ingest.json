@@ -87,7 +87,7 @@
     },
 
     "bms": {
-      "_说明": "需先按 README / scripts/bms_gnss_migration.sql 建 imp_bms/lc_bms；已有表必须先执行该迁移脚本加上 gnss_* 列，否则定位字段写库会因列不存在而整批回滚",
+      "_说明": "需先按 README / scripts/bms_gnss_migration.sql 建 imp_bms/lc_bms；已有表必须先执行该迁移脚本加上 gnss_* 列，否则定位字段写库会因列不存在而整批回滚。cell_voltages 的 $18::real[]::numeric(6,3)[] 用于规避 epgsql 未注册 numeric[] 编码器的问题，勿删",
       "dedup": "SELECT 1 FROM imp_bms WHERE file_name = $1",
       "imp_fields": ["file_name", "device_id", "imp_stamp"],
       "imp": "INSERT INTO imp_bms(file_name, device_id, imp_stamp) VALUES ($1,$2,$3) ON CONFLICT (file_name) DO NOTHING",
@@ -126,7 +126,7 @@
         "gnss_satellites",
         "gnss_utc"
       ],
-      "record": "INSERT INTO lc_bms(imp_stamp, file_name, device_id, total_voltage, current, power, soc, soh, capacity_total, capacity_remain, cycle_ah, total_cycles, runtime_sec, cell_max_v, cell_min_v, cell_delta_v, cell_count, cell_voltages, temps_c, mos_temp_c, charging, chg_mos_on, dsg_mos_on, balancing, alarm_code, gnss_valid, gnss_latitude, gnss_longitude, gnss_altitude_m, gnss_speed_kmh, gnss_course_deg, gnss_satellites, gnss_utc) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)"
+      "record": "INSERT INTO lc_bms(imp_stamp, file_name, device_id, total_voltage, current, power, soc, soh, capacity_total, capacity_remain, cycle_ah, total_cycles, runtime_sec, cell_max_v, cell_min_v, cell_delta_v, cell_count, cell_voltages, temps_c, mos_temp_c, charging, chg_mos_on, dsg_mos_on, balancing, alarm_code, gnss_valid, gnss_latitude, gnss_longitude, gnss_altitude_m, gnss_speed_kmh, gnss_course_deg, gnss_satellites, gnss_utc) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::real[]::numeric(6,3)[],$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)"
     }
   }
 }

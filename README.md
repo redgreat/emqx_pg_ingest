@@ -264,6 +264,16 @@ create index non_lc_bms_file_name on lc_bms (file_name);
 create index non_lc_bms_createdat on lc_bms (createdat desc);
 ```
 
+> **`cell_voltages` 的 SQL 必须带显式转型**：本插件用的 epgsql 4.7 只注册了
+> `smallint[]` / `real[]` 等数组编码器，没有 `numeric[]`（OID 1231）。直接把解码出的
+> 浮点列表传给 `numeric(6,3)[]` 参数会在 `epgsql_wire:encode_text/1` 里触发
+> `list_to_binary([3.564])` 的 `badarg`，连接进程崩溃、整个 BMS 事务回滚——
+> 表现为「MQTT 收到了、解码也对了，但 `lc_bms` 永远 0 行」。
+> 因此 `bms.record` 里对应 `cell_voltages` 的占位符写成
+> `$18::real[]::numeric(6,3)[]`：让参数被推断为 epgsql 支持的 `real[]`，
+> 由 PostgreSQL 再转成 `numeric(6,3)[]` 入库（电压原始值只有 3 位小数，不丢精度）。
+> 自定义 SQL 时不要删掉这个转型；`temps_c` 是 `smallint[]`，保持整数列表原样即可。
+
 ### BMS 板载定位字段（`board_gnss`）
 
 simlive 固件在每条 `BM` 消息的**主体 CRC16 之后**追加可选尾段（flags bit1）：
@@ -311,6 +321,10 @@ psql -h ... -d eadm -c "select count(*), max(inserttime) from lc_racebox;"
 3. 钩子**原样返回消息**（不改内容、不拦截），插件异常只记日志，不影响消息转发。
 4. `pool_size` 为 worker 数；同一 `file_name` 永远落在同一 worker，**不要把 pool_size 调大后又改字段映射导致批次分裂**。
    RBX2 实际以稳定的 `session_key` 路由，同一轨迹段的 open/final 批次不会落到不同 worker。
+5. **排查 BMS「收得到但库里没数据」时先看 `cell_voltages`**：epgsql 4.7 没有
+   `numeric[]` 编码器，浮点列表会让 epgsql 连接进程 `badarg` 崩溃并回滚事务。
+   `priv/emqx_pg_ingest.json` 的 `bms.record` 已用 `$18::real[]::numeric(6,3)[]`
+   规避；线上 `etc/emqx_pg_ingest.json` 是独立挂载文件，升级时必须同步这一处 SQL。
 
 ## 测试
 
