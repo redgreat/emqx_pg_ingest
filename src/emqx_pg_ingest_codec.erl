@@ -5,7 +5,8 @@
 %%%   rbx1        deskwong 固件：`deskwong/racebox/data`，`RBX1` 头 96B + N×80B（小端）
 %%%   rbx2        deskwong 固件：轨迹段级幂等协议，`RBX2` 头 136B + N×80B（小端）
 %%%   simlive_rb  simlive 固件：`simlive/{device}/data`，`RB` + file_name + N×80B + CRC16
-%%%   simlive_bm  simlive 固件：`simlive/{device}/bms`，`BM` + file_name + 快照 + CRC16
+%%%   simlive_bm  simlive 固件：`simlive/{device}/bms`，`BM` + file_name + 快照 +
+%%%              CRC16 + 可选 26B 板载定位尾段（flags bit1，见 §3B.1）
 %%%
 %%% 参考：deskwong/doc/racebox-mqtt-binary.md、simlive/doc/binary_protocol.md
 %%% 注意：两种定位协议的 speed 单位不同（rbx1 为 m/s、simlive 为 km/h），
@@ -384,39 +385,51 @@ decode_simlive_rb_record(
         rotation_rate_z => Rz / 100.0
     }.
 
-%% @doc simlive BMS 快照（`BM` + file_name + 40B 定长字段 + 单体电压/温度数组 + CRC16）。
-%% 定长块按 simlive/doc/binary_protocol.md §3B 的 Python 参考实现（`<HiiBBIIIIIHHHBB`，40B）解析；
-%% 注意文档表格标注为 45B，与参考实现不一致，首次联调请用一条真实报文核对。
+%% @doc simlive BMS 快照（`BM` + file_name + 40B 定长字段 + 变长数组 + 主体 CRC16
+%%      + 可选 26B 板载定位尾段）。
+%%
+%% 定长块按 simlive/doc/binary_protocol.md §3B 的 Python 参考实现
+%% （`<HiiBBIIIIIHHHBB` = 40B）解析；文档表格写的 45B 是把后面的
+%% mos_temp(2) + status(1) + alarm(2) 一起算进去了。
+%%
+%% flags bit1 = 带板载定位尾段：主体 CRC16 之后追加 24B 数据 + 2B 尾段 CRC16。
+%% VERSION 与主体布局不变，旧解码器读到主体 CRC 即结束；本解码器对无尾段的
+%% 旧报文照常解码，并把 gnss_* 字段填 null，保证 SQL 字段映射不会缺值。
 -spec decode_simlive_bm(binary()) -> {ok, decoded()} | {error, term()}.
 decode_simlive_bm(
-    <<"BM", Ver:8, _Flags:8, NameLen:8, Name:NameLen/binary, Fixed:40/binary, Rest/binary>> =
+    <<"BM", Ver:8, Flags:8, NameLen:8, Name:NameLen/binary, Fixed:40/binary, Rest/binary>> =
         Payload
 ) when Ver =:= 1 ->
     <<TotalV:16/little, Current:32/little-signed, Power:32/little-signed, Soc:8, Soh:8,
         CapTotal:32/little, CapRemain:32/little, CycleAh:32/little, TotalCycles:32/little,
         Runtime:32/little, CellMax:16/little, CellMin:16/little, CellDelta:16/little,
         CellCount:8, TempCount:8>> = Fixed,
-    Need = CellCount * 2 + TempCount * 2 + 2 + 1 + 2 + 2,
-    case byte_size(Rest) =:= Need of
+    %% 变长数组 + mos_temp(2) + status(1) + alarm(2)，不含任何 CRC
+    TailLen = CellCount * 2 + TempCount * 2 + 2 + 1 + 2,
+    BodyEnd = 5 + NameLen + 40 + TailLen,
+    WithGnss = (Flags band 16#02) =/= 0,
+    TrailerLen = case WithGnss of
+        true -> 26;
+        false -> 0
+    end,
+    Expected = BodyEnd + 2 + TrailerLen,
+    case byte_size(Payload) =:= Expected of
         false ->
-            {error, {bad_bms_length, #{cells => CellCount, temps => TempCount, tail => byte_size(Rest)}}};
+            {error, {bad_bms_length, #{cells => CellCount, temps => TempCount,
+                                       expect => Expected, got => byte_size(Payload),
+                                       with_gnss => WithGnss}}};
         true ->
-            Body = binary:part(Payload, 0, byte_size(Payload) - 2),
-            <<Crc:16/little>> = binary:part(Payload, byte_size(Payload) - 2, 2),
+            Body = binary:part(Payload, 0, BodyEnd),
+            <<MainCrc:16/little>> = binary:part(Payload, BodyEnd, 2),
             case crc16_ccitt(Body) of
-                Crc ->
-                    <<CellsBin:(CellCount * 2)/binary, TempsBin:(TempCount * 2)/binary,
-                        MosTemp:16/little-signed, Status:8, Alarm:16/little, _Crc:16/little>> =
-                        Rest,
-                    {ok, #{
-                        kind => simlive_bm,
-                        file_name => Name,
-                        device_id => undefined,
-                        duration => 0,
-                        record_count => 1,
-                        total => 1,
-                        records => [
-                            #{
+                MainCrc ->
+                    case decode_bms_gnss_trailer(WithGnss, Payload, BodyEnd + 2) of
+                        {ok, GnssFields, BoardGnss} ->
+                            <<CellsBin:(CellCount * 2)/binary,
+                                TempsBin:(TempCount * 2)/binary,
+                                MosTemp:16/little-signed, Status:8, Alarm:16/little,
+                                _MainCrc:16/little, _Trailer/binary>> = Rest,
+                            Bms = #{
                                 total_voltage => TotalV / 100.0,
                                 current => Current / 100.0,
                                 power => Power,
@@ -440,17 +453,81 @@ decode_simlive_bm(
                                 dsg_mos_on => (Status band 16#04) =/= 0,
                                 balancing => (Status band 16#08) =/= 0,
                                 alarm_code => Alarm
-                            }
-                        ]
-                    }};
+                            },
+                            {ok, #{
+                                kind => simlive_bm,
+                                file_name => Name,
+                                device_id => undefined,
+                                duration => 0,
+                                record_count => 1,
+                                total => 1,
+                                board_gnss => BoardGnss,
+                                records => [maps:merge(Bms, GnssFields)]
+                            }};
+                        {error, Reason} ->
+                            {error, Reason}
+                    end;
                 Got ->
-                    {error, {crc_mismatch, #{expect => Crc, got => Got}}}
+                    {error, {crc_mismatch, #{expect => MainCrc, got => Got}}}
             end
     end;
 decode_simlive_bm(<<"BM", _/binary>> = Payload) ->
     {error, {bad_simlive_bm_payload, byte_size(Payload)}};
 decode_simlive_bm(_) ->
     {error, not_simlive_bm}.
+
+%% @doc 解析可选板载定位尾段；返回 {ok, 扁平字段, 顶层 board_gnss}。
+%% 无尾段时全部字段填 null：SQL 的 record_fields 里固定引用这些名字，
+%% 旧报文也不能因为缺字段触发 {missing_field, ...} 回滚。
+-spec decode_bms_gnss_trailer(boolean(), binary(), non_neg_integer()) ->
+    {ok, map(), map() | null} | {error, term()}.
+decode_bms_gnss_trailer(false, _Payload, _Offset) ->
+    {ok, null_gnss_fields(), null};
+decode_bms_gnss_trailer(true, Payload, G) ->
+    Trailer = binary:part(Payload, G, 24),
+    <<Crc:16/little>> = binary:part(Payload, G + 24, 2),
+    case crc16_ccitt(Trailer) of
+        Crc ->
+            <<GFlags:8, Lat:32/little-signed, Lon:32/little-signed, Alt:16/little-signed,
+                Speed:16/little, Course:16/little, Sats:8, Year:16/little,
+                Mon:8, Day:8, Hour:8, Min:8, Sec:8, _Reserved:8>> = Trailer,
+            Fields = #{
+                gnss_valid => (GFlags band 16#01) =/= 0,
+                gnss_latitude => Lat / 1.0e7,
+                gnss_longitude => Lon / 1.0e7,
+                gnss_altitude_m => Alt / 1.0,
+                gnss_speed_kmh => Speed / 100.0,
+                gnss_course_deg => Course / 10.0,
+                gnss_satellites => Sats,
+                gnss_utc => gnss_utc_text(GFlags, Year, Mon, Day, Hour, Min, Sec)
+            },
+            {ok, Fields, Fields};
+        Got ->
+            {error, {bms_gnss_crc_mismatch, #{expect => Crc, got => Got}}}
+    end.
+
+null_gnss_fields() ->
+    #{
+        gnss_valid => null,
+        gnss_latitude => null,
+        gnss_longitude => null,
+        gnss_altitude_m => null,
+        gnss_speed_kmh => null,
+        gnss_course_deg => null,
+        gnss_satellites => null,
+        gnss_utc => null
+    }.
+
+%% 未定位 / 时间字段异常时写 NULL，避免把 0000-00-00 塞进库。
+gnss_utc_text(GFlags, Year, Mon, Day, Hour, Min, Sec)
+    when (GFlags band 16#01) =/= 0, Year >= 2000, Mon >= 1, Mon =< 12,
+         Day >= 1, Day =< 31, Hour =< 23, Min =< 59, Sec =< 60 ->
+    iolist_to_binary(
+        io_lib:format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B",
+                      [Year, Mon, Day, Hour, Min, Sec])
+    );
+gnss_utc_text(_, _, _, _, _, _, _) ->
+    null.
 
 %%%===================================================================
 %%% 内部工具

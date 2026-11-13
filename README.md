@@ -32,7 +32,7 @@
 | `rbx2` | `RBX2`（头 136B + N×80B，双 CRC32） | `deskwong/racebox/data` | `deskwong/doc/racebox-mqtt-binary.md` |
 | `rbx1` | `RBX1`（头 96B + N×80B，双 CRC32） | `deskwong/racebox/data` | `deskwong/doc/racebox-mqtt-binary.md` |
 | `simlive_rb` | `RB` + file_name + N×80B + CRC16 | `simlive/{device}/data` | `simlive/doc/binary_protocol.md` §2–3 |
-| `simlive_bm` | `BM` + file_name + 快照 + CRC16 | `simlive/{device}/bms` | 同上 §3B |
+| `simlive_bm` | `BM` + file_name + 快照 + CRC16 + 可选 26B 板载定位尾段 | `simlive/{device}/bms` | 同上 §3B / §3B.1 |
 | `auto` | 按魔数自动识别 | 任意 | — |
 
 **字段换算的两处关键决定**：
@@ -228,12 +228,21 @@ emqx ctl plugins list
 `*_fields` 与 SQL 里的 `$n` **按位置一一对应**，改字段只改这两处即可，不用改代码。
 字段名写错会报 `{missing_field, 字段名, [...]}` 并回滚，便于定位配置问题。
 
-### BMS 表（当前仓库尚未建，需要时按此新建）
+### BMS 表（首次使用 / 已有表升级）
+
+**发布插件前先执行** `scripts/bms_gnss_migration.sql`：新库直接建表，已有 `lc_bms` 的库
+用 `ADD COLUMN IF NOT EXISTS` 补上 8 个 `gnss_*` 列。该脚本可重复执行。
+线上 `eadm` 库的时间列叫 `createdat`（早期文档写过 `inserttime`），脚本会按实际
+存在的列名建时间索引，因此对已有表也能安全执行。
+
+> 不做这一步的话，`bms` profile 的 INSERT 引用了不存在的列，整条 BMS 消息的事务会
+> 回滚并断开连接（日志出现 `sql_failed`），BMS 数据会全部写不进去。
 
 ```sql
+-- 简版（完整 DDL 与可重复执行的迁移见 scripts/bms_gnss_migration.sql）
 create table imp_bms (id bigserial primary key, file_name varchar(200) not null,
                       device_id varchar(100), imp_stamp uuid not null,
-                      inserttime timestamptz not null default current_timestamp);
+                      createdat timestamptz not null default current_timestamp);
 create unique index uni_imp_bms_file_name on imp_bms (file_name);
 
 create table lc_bms (id bigserial primary key, imp_stamp uuid not null,
@@ -246,10 +255,34 @@ create table lc_bms (id bigserial primary key, imp_stamp uuid not null,
                      cell_count smallint, cell_voltages numeric(6,3)[], temps_c smallint[],
                      mos_temp_c smallint, charging boolean, chg_mos_on boolean,
                      dsg_mos_on boolean, balancing boolean, alarm_code integer,
-                     inserttime timestamptz not null default current_timestamp);
+                     gnss_valid boolean, gnss_latitude numeric(10,7),
+                     gnss_longitude numeric(10,7), gnss_altitude_m numeric(8,1),
+                     gnss_speed_kmh numeric(7,2), gnss_course_deg numeric(6,1),
+                     gnss_satellites smallint, gnss_utc text,
+                     createdat timestamptz not null default current_timestamp);
 create index non_lc_bms_file_name on lc_bms (file_name);
-create index non_lc_bms_inserttime on lc_bms (inserttime desc);
+create index non_lc_bms_createdat on lc_bms (createdat desc);
 ```
+
+### BMS 板载定位字段（`board_gnss`）
+
+simlive 固件在每条 `BM` 消息的**主体 CRC16 之后**追加可选尾段（flags bit1）：
+24B 定位数据 + 2B 尾段 CRC16。主体布局、VERSION、主体 CRC 位置都不变，
+所以旧报文照常解码，新插件也能解旧消息。解码后写入 `lc_bms` 的 `gnss_*` 列：
+
+| 字段 | 说明 |
+|------|------|
+| `gnss_valid` | 是否有效定位；未定位为 `false`，旧报文（无尾段）为 `NULL` |
+| `gnss_latitude` / `gnss_longitude` | 十进制度（原始 i32 ÷1e7） |
+| `gnss_altitude_m` | MSL 海拔，米 |
+| `gnss_speed_kmh` | 对地速度，km/h（模组原始为节，×1.852） |
+| `gnss_course_deg` | 航向，度（当前模组未输出，恒 0） |
+| `gnss_satellites` | 参与定位卫星数 |
+| `gnss_utc` | 定位 UTC 时间文本 `YYYY-MM-DD HH:MM:SS`；未定位/时间异常为 `NULL` |
+
+前提：固件 `gnss.enabled=true` 且 4G 模组 AT 通道可用。未定位时字段仍随消息上报
+（`valid=false`），方便区分「没定位」与「没上报」。离线缓存补传的消息带的是
+**采集当时**的定位，不是补传时的位置。
 
 ## 验证
 
@@ -268,9 +301,11 @@ psql -h ... -d eadm -c "select count(*), max(inserttime) from lc_racebox;"
 
 ## 注意事项
 
-1. **BMS 定长块有文档分歧**：`binary_protocol.md` 正文表格写 45B，而随文 Python 参考实现按
-   `<HiiBBIIIIIHHHBB` = **40B** 解析；本插件按 40B 实现。**首次联调请用一条真实 `BM` 报文核对**，
-   不一致时只改 `decode_simlive_bm/1` 里的定长定义即可。
+1. **BMS 定长块 40B，不是 45B**：`binary_protocol.md` 正文表格的 45B 是把定长块
+   （`<HiiBBIIIIIHHHBB` = 40B）与后面的 `mos_temp(2) + status(1) + alarm(2)` 一起算了；
+   本插件按 40B + 5B 尾部实现，已用真实报文往返核对。
+   **带定位尾段的报文，主体 CRC16 在 `alarm_code` 之后，不在消息末尾**——
+   按「末尾 2 字节 = CRC」解析会把尾段 CRC 当成主体 CRC 而误判为坏包。
 2. 去重语义：`simlive` 用报文自带的 `file_name`；`rbx1` 仅提供消息级去重；`rbx2` 用稳定
    `session_key`、`batch_key` 和 `record_index` 三级去重，并用最终文件名兼容旧 Python 消费者。
 3. 钩子**原样返回消息**（不改内容、不拦截），插件异常只记日志，不影响消息转发。
@@ -284,6 +319,7 @@ erlc -o ebin src/*.erl test/*.erl
 erl -noshell -pa ebin -eval 'eunit:test(emqx_pg_ingest_codec_tests, [verbose]), init:stop().'
 ```
 
-覆盖 13 条：CRC16 标准向量、CRC32 与 `erlang:crc32/1` 一致性、UUID v4 格式、魔数识别、
+覆盖 25 条：CRC16 标准向量、CRC32 与 `erlang:crc32/1` 一致性、UUID v4 格式、魔数识别、
 RBX1 完整解码与 km/h 换算、RBX2 稳定轨迹段键/记录序号、RBX1 长度/CRC 错误、simlive RB 解码与 CRC 错误与截断、
-simlive BM 快照（含单体电压/温度数组、状态位）、主题 `+`/`#` 通配与第 N 段提取。
+simlive BM 快照（含单体电压/温度数组、状态位）、**BM 板载定位尾段解码 / 旧报文兼容 /
+未定位 / 尾段 CRC 校验**、主题 `+`/`#` 通配与第 N 段提取等。

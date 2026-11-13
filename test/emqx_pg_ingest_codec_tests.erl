@@ -304,6 +304,56 @@ simlive_bm_decode_test() ->
     ?assertEqual(false, maps:get(balancing, S)),
     ?assertEqual(0, maps:get(alarm_code, S)).
 
+%% 带板载定位尾段的新报文：主体字段不变，gnss_* 一并解码出来供入库。
+simlive_bm_board_gnss_decode_test() ->
+    Payload = simlive_bm_payload(<<"BMS_100">>, 6790, 890, [3564], [31], 35, 3,
+                                 3, board_gnss_trailer()),
+    {ok, D} = emqx_pg_ingest_codec:decode(auto, Payload),
+    ?assertEqual(simlive_bm, maps:get(kind, D)),
+    ?assert(is_map(maps:get(board_gnss, D))),
+    [S] = maps:get(records, D),
+    ?assertEqual(67.90, maps:get(total_voltage, S)),
+    ?assertEqual(true, maps:get(gnss_valid, S)),
+    ?assert(abs(maps:get(gnss_latitude, S) - 31.2304160) < 1.0e-6),
+    ?assert(abs(maps:get(gnss_longitude, S) - 121.4737021) < 1.0e-6),
+    ?assert(abs(maps:get(gnss_altitude_m, S) - 12.0) < 1.0e-9),
+    ?assert(abs(maps:get(gnss_speed_kmh, S) - 18.52) < 1.0e-9),
+    ?assert(abs(maps:get(gnss_course_deg, S) - 123.4) < 1.0e-9),
+    ?assertEqual(12, maps:get(gnss_satellites, S)),
+    ?assertEqual(<<"2026-11-13 14:28:32">>, maps:get(gnss_utc, S)).
+
+%% 旧报文（flags 无 bit1）仍可解码，且 gnss_* 全部为 null，
+%% 避免配置里新增字段后旧消息触发 {missing_field, ...} 回滚。
+simlive_bm_legacy_without_gnss_test() ->
+    Payload = simlive_bm_payload(<<"BMS_36720000">>, 6790, 890, [3564, 3565, 3584],
+                                 [31, 33], 35, 3),
+    {ok, D} = emqx_pg_ingest_codec:decode(simlive_bm, Payload),
+    ?assertEqual(null, maps:get(board_gnss, D)),
+    [S] = maps:get(records, D),
+    ?assertEqual(null, maps:get(gnss_valid, S)),
+    ?assertEqual(null, maps:get(gnss_latitude, S)),
+    ?assertEqual(null, maps:get(gnss_utc, S)),
+    ?assertEqual(67.90, maps:get(total_voltage, S)).
+
+%% 未定位时仍带尾段，但 valid=false、UTC 时间写 NULL。
+simlive_bm_board_gnss_no_fix_test() ->
+    Payload = simlive_bm_payload(<<"BMS_101">>, 6790, 890, [3564], [31], 35, 3,
+                                 3, board_gnss_no_fix_trailer()),
+    {ok, D} = emqx_pg_ingest_codec:decode(simlive_bm, Payload),
+    [S] = maps:get(records, D),
+    ?assertEqual(false, maps:get(gnss_valid, S)),
+    ?assertEqual(null, maps:get(gnss_utc, S)),
+    ?assertEqual(0.0, maps:get(gnss_latitude, S)).
+
+%% 尾段自带 CRC16 被破坏时必须报错，不能把错误定位写进库。
+simlive_bm_board_gnss_bad_crc_test() ->
+    Payload = simlive_bm_payload(<<"BMS_102">>, 6790, 890, [3564], [31], 35, 3,
+                                 3, board_gnss_trailer()),
+    ?assertMatch(
+        {error, {bms_gnss_crc_mismatch, _}},
+        emqx_pg_ingest_codec:decode(simlive_bm, flip_last_byte(Payload))
+    ).
+
 %%%===================================================================
 %%% 报文构造工具（与协议文档字节布局一一对应）
 %%%===================================================================
@@ -365,14 +415,39 @@ simlive_rb_payload(Name, Recs, Duration) ->
     <<Body/binary, (emqx_pg_ingest_codec:crc16_ccitt(Body)):16/little>>.
 
 simlive_bm_payload(Name, TotalV, Current, Cells, Temps, MosTemp, Status) ->
+    simlive_bm_payload(Name, TotalV, Current, Cells, Temps, MosTemp, Status, 1, undefined).
+
+%% Flags bit1 + 24B 尾段数据 → 带板载定位的新报文：
+%% 主体 CRC16 之后追加尾段数据 + 尾段自己的 CRC16（共 26B）。
+simlive_bm_payload(Name, TotalV, Current, Cells, Temps, MosTemp, Status, Flags, GnssData) ->
     CellBin = iolist_to_binary([<<C:16/little>> || C <- Cells]),
     TempBin = iolist_to_binary([<<T:16/little-signed>> || T <- Temps]),
     Fixed = <<TotalV:16/little, Current:32/little-signed, 604:32/little-signed, 19:8, 100:8,
         50000:32/little, 10300:32/little, 10126331:32/little, 10126:32/little, 36720000:32/little,
         3584:16/little, 3564:16/little, 20:16/little, (length(Cells)):8, (length(Temps)):8>>,
-    Body = <<"BM", 1:8, 1:8, (byte_size(Name)):8, Name/binary, Fixed/binary, CellBin/binary,
+    Body = <<"BM", 1:8, Flags:8, (byte_size(Name)):8, Name/binary, Fixed/binary, CellBin/binary,
         TempBin/binary, MosTemp:16/little-signed, Status:8, 0:16/little>>,
-    <<Body/binary, (emqx_pg_ingest_codec:crc16_ccitt(Body)):16/little>>.
+    Main = <<Body/binary, (emqx_pg_ingest_codec:crc16_ccitt(Body)):16/little>>,
+    case GnssData of
+        undefined -> Main;
+        _ -> <<Main/binary, GnssData/binary,
+               (emqx_pg_ingest_codec:crc16_ccitt(GnssData)):16/little>>
+    end.
+
+%% simlive/doc/binary_protocol.md §3B.1：24B 板载定位尾段数据
+board_gnss_trailer() ->
+    <<1:8, 312304160:32/little-signed, 1214737021:32/little-signed, 12:16/little-signed,
+      1852:16/little, 1234:16/little, 12:8, 2026:16/little,
+      11:8, 13:8, 14:8, 28:8, 32:8, 0:8>>.
+
+board_gnss_no_fix_trailer() ->
+    <<0:8, 0:32/little, 0:32/little, 0:16/little, 0:16/little, 0:16/little,
+      0:8, 0:16/little, 0:8, 0:8, 0:8, 0:8, 0:8, 0:8>>.
+
+flip_last_byte(Payload) ->
+    Size = byte_size(Payload),
+    <<Head:(Size - 1)/binary, Last:8>> = Payload,
+    <<Head/binary, (Last bxor 16#FF):8>>.
 
 pad48(Bin) ->
     Pad = 48 - byte_size(Bin),
